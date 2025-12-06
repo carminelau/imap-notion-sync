@@ -66,64 +66,6 @@ def get_best_body(msg) -> tuple[str,str]:
 	text = plain or html_to_text(html)
 	return text, html
 
-# --- Parser line items stile "Articoli in questa spedizione" ---
-RE_ORDER_ID = re.compile(r"\bOrdine\s+([A-Z0-9\-]+)", re.I)
-RE_TRACKING = re.compile(r"(?:tracking|numero di tracking)[: ]+\s*([A-Z0-9\-]+)", re.I)
-RE_QTY = re.compile(r"\b(\d+)\s+di\s+\d+\b", re.I)
-
-def parse_lineitems(text: str) -> dict:
-	items = []
-	order_id = None
-	tracking = None
-
-	m = RE_ORDER_ID.search(text)
-	if m: order_id = m.group(1).strip()
-	m = RE_TRACKING.search(text)
-	if m: tracking = m.group(1).strip()
-
-	start = text.lower().find("articoli in questa spedizione")
-	segment = text[start:] if start >= 0 else text
-
-	chunks = re.split(r"(?:\n|\s){2,}|-{3,}", segment)
-	def clean(s): return " ".join(s.strip().split())
-
-	i = 0
-	while i < len(chunks):
-		t = clean(chunks[i])
-		if t and (("×" in t) or (len(t) > 12 and not RE_QTY.search(t))):
-			title = t.replace("×", "x")
-			qty = None
-			variant = None
-			sku = None
-
-			for j in range(1,4):
-				if i + j >= len(chunks): break
-				line = clean(chunks[i+j])
-				if not line: continue
-				if qty is None:
-					mq = RE_QTY.search(line)
-					if mq:
-						qty = int(mq.group(1))
-						continue
-				if variant is None and ("/" in line or re.search(r"\b(kg|ml|mm|cm|colore)\b", line, re.I)):
-					variant = line
-					continue
-				if sku is None and (len(line) <= 12 and line.isalnum()):
-					sku = line
-
-			if qty is not None:
-				items.append({
-					"title": title,
-					"qty": qty,
-					"variant": variant,
-					"sku": sku
-				})
-			i += 3
-		else:
-			i += 1
-
-	return {"items": items, "order_id": order_id, "tracking": tracking}
-
 # --- IMAP ---
 def imap_search_since(imap, folder, since_date):
 	typ, _ = imap.select(f'"{folder}"', readonly=True)
@@ -163,43 +105,16 @@ def fetch_batch(imap, uids):
 			out[cur_uid] = {"raw": raw, "flags": cur_flags[:] }
 	return out
 
-# --- Notion: upsert solo materiali ---
-def find_line_item_page(msgid, title, variant, sku):
-	cond = [
-		{"property":"Message-ID","rich_text":{"equals": msgid}},
-		{"property":"Material","title":{"equals": title}},
-	]
-	if variant:
-		cond.append({"property":"Variant","text":{"equals": variant}})
-	if sku:
-		cond.append({"property":"SKU","text":{"equals": sku}})
-	resp = notion.databases.query(database_id=LINE_DB_ID, filter={"and": cond}, page_size=1)
-	return resp["results"][0] if resp["results"] else None
-
-def upsert_items_only(msgid, dt, text):
-	parsed = parse_lineitems(text)
-	order_id = parsed.get("order_id") or ""
-	tracking = parsed.get("tracking") or ""
-	for it in parsed["items"]:
-		title = it.get("title") or "(Materiale)"
-		qty = int(it.get("qty") or 0)
-		variant = it.get("variant") or ""
-		sku = it.get("sku") or ""
-		page = find_line_item_page(msgid, title, variant, sku)
-		props = {
-			"Material": {"title":[{"type":"text","text":{"content": title}}]},
-			"Qty": {"number": qty},
-			"Variant": {"rich_text":[{"type":"text","text":{"content": variant}}]} if variant else {"rich_text":[]},
-			"SKU": {"rich_text":[{"type":"text","text":{"content": sku}}]} if sku else {"rich_text":[]},
-			"Order ID": {"rich_text":[{"type":"text","text":{"content": order_id}}]} if order_id else {"rich_text":[]},
-			"Tracking": {"rich_text":[{"type":"text","text":{"content": tracking}}]} if tracking else {"rich_text":[]},
-			"Message-ID": {"rich_text":[{"type":"text","text":{"content": msgid}}]} if msgid else {"rich_text":[]},
-			"Email Date": {"date":{"start": dt.astimezone(timezone.utc).isoformat()}},
-		}
-		if page:
-			notion.pages.update(page_id=page["id"], properties=props)
-		else:
-			notion.pages.create(parent={"database_id": LINE_DB_ID}, properties=props)
+# --- Notion: inserimento email ---
+def create_email_page(msgid, sender, subject, dt, text):
+	props = {
+		"Message-ID": {"rich_text":[{"type":"text","text":{"content": msgid}}]} if msgid else {"rich_text":[]},
+		"From": {"rich_text":[{"type":"text","text":{"content": sender}}]} if sender else {"rich_text":[]},
+		"Subject": {"title":[{"type":"text","text":{"content": subject}}]},
+		"Body": {"rich_text":[{"type":"text","text":{"content": text}}]} if text else {"rich_text":[]},
+		"Email Date": {"date":{"start": dt.astimezone(timezone.utc).isoformat()}},
+	}
+	notion.pages.create(parent={"database_id": LINE_DB_ID}, properties=props)
 
 # --- Parse headers minimi ---
 def parse_email_metadata(raw_bytes):
@@ -210,10 +125,12 @@ def parse_email_metadata(raw_bytes):
 			s += (part.decode(enc or "utf-8","replace") if isinstance(part, bytes) else part)
 		return s.strip()
 	msgid = get_header("Message-ID") or ""
+	sender = get_header("From") or ""
+	subject = get_header("Subject") or ""
 	date_tuple = email.utils.parsedate_tz(m.get("Date"))
 	dt = datetime.fromtimestamp(email.utils.mktime_tz(date_tuple), tz=timezone.utc) if date_tuple else datetime.now(timezone.utc)
 	text, _ = get_best_body(m)
-	return msgid, dt, text
+	return msgid, sender, subject, dt, text
 
 # --- Main ---
 def main():
@@ -230,9 +147,9 @@ def main():
 					item = results.get(uid)
 					if not item:
 						continue
-					msgid, dt, text = parse_email_metadata(item["raw"])
+					msgid, sender, subject, dt, text = parse_email_metadata(item["raw"])
 					if text:
-						upsert_items_only(msgid, dt, text)
+						create_email_page(msgid, sender, subject, dt, text)
 						time.sleep(0.1)  # rate-limit Notion
 		imap.logout()
 
