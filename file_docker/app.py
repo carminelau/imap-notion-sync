@@ -82,30 +82,108 @@ def imap_search_since(imap, folder, since_date):
 	# Prefer UID SEARCH so results are UIDs compatible with later `uid('fetch', ...)`.
 	# Some servers/clients return sequence numbers for `search()` which would
 	# not match `uid('fetch', ...)` and cause fetching of wrong messages.
+	used_uid = False
+	decoded = []
 	try:
 		typ, data = imap.uid('search', None, 'SINCE', crit)
 		if typ == 'OK' and data and data[0]:
 			uids = data[0].split()
 			decoded = [uid.decode() for uid in uids]
+			used_uid = True
 			logger.debug("UID search returned %d ids (sample: %s)", len(decoded), decoded[:5])
-			return decoded
 		else:
 			logger.debug("UID search returned no data or non-OK: typ=%s", typ)
 	except Exception:
 		logger.debug("UID search failed, falling back to sequence SEARCH", exc_info=True)
 
 	# Fallback: sequence-based SEARCH (keep backwards compatibility).
-	typ, data = imap.search(None, "SINCE", crit)
-	if typ != "OK":
+	if not used_uid:
+		typ, data = imap.search(None, "SINCE", crit)
+		if typ != "OK":
+			return []
+		uids = data[0].split() if data and data[0] else []
+		decoded = [uid.decode() for uid in uids]
+		logger.debug("Sequence search returned %d ids (sample: %s)", len(decoded), decoded[:5])
+
+	# If there are no ids, return early
+	if not decoded:
 		return []
-	uids = data[0].split() if data and data[0] else []
-	decoded = [uid.decode() for uid in uids]
-	logger.debug("Sequence search returned %d ids (sample: %s)", len(decoded), decoded[:5])
-	return decoded
+
+	# Try to fetch INTERNALDATE for each id (use UID or sequence fetch depending on search type)
+	# We'll batch the fetch to avoid overly long command strings.
+	filtered = []
+	excluded = []
+	BATCH_INTERNAL_FETCH = 200
+	for i in range(0, len(decoded), BATCH_INTERNAL_FETCH):
+		batch = decoded[i:i+BATCH_INTERNAL_FETCH]
+		seq = ",".join(batch)
+		try:
+			if used_uid:
+				typ2, data2 = imap.uid('fetch', seq, '(INTERNALDATE)')
+			else:
+				typ2, data2 = imap.fetch(seq, '(INTERNALDATE)')
+			if typ2 != 'OK' or not data2:
+				logger.debug("INTERNALDATE fetch empty or non-OK for seq=%s typ=%s", seq, typ2)
+				# If we can't fetch INTERNALDATE, include all batch items as a safe fallback
+				filtered.extend(batch)
+				continue
+		except Exception:
+			logger.debug("INTERNALDATE fetch failed for seq=%s", seq, exc_info=True)
+			filtered.extend(batch)
+			continue
+
+		# Parse fetch response entries
+		# data2 may contain tuples like (b'1 (UID 123 INTERNALDATE "17-Nov-2025 10:12:00 +0000")', b'')
+		uid_to_dt = {}
+		for item in data2:
+			if not isinstance(item, tuple):
+				continue
+			header = item[0].decode(errors='ignore')
+			# Extract UID if present
+			m_uid = re.search(r"UID\s+(\d+)", header)
+			if m_uid:
+				cur_id = m_uid.group(1)
+			else:
+				# Fallback: first token often is the id (sequence or uid depending on fetch)
+				try:
+					cur_id = header.split()[0]
+				except Exception:
+					cur_id = None
+
+			# Extract INTERNALDATE
+			m_dt = re.search(r'INTERNALDATE\s+"([^"]+)"', header)
+			if m_dt and cur_id:
+				raw_dt = m_dt.group(1)
+				try:
+					pt = email.utils.parsedate_tz(raw_dt)
+					if pt:
+						ts = email.utils.mktime_tz(pt)
+						uid_to_dt[cur_id] = datetime.fromtimestamp(ts, tz=timezone.utc)
+				except Exception:
+					logger.debug("Failed parsing INTERNALDATE '%s' for id=%s", raw_dt, cur_id)
+
+		# Decide inclusion based on since_date
+		for id_ in batch:
+			dt = uid_to_dt.get(id_)
+			if dt:
+				if dt >= since_date.astimezone(timezone.utc):
+					filtered.append(id_)
+				else:
+					excluded.append((id_, dt.isoformat()))
+			else:
+				# No INTERNALDATE available for this id, include it and log
+				filtered.append(id_)
+				logger.debug("No INTERNALDATE for id=%s; included by fallback", id_)
+
+	if excluded:
+		logger.info("Excluded %d ids older than since_date (sample: %s)", len(excluded), excluded[:5])
+
+	return filtered
+
 
 def fetch_batch(imap, uids):
-	if not uids: return {}
-	# Use UID FETCH to make sure we're fetching by UID (search returns UIDs on many servers)
+	if not uids:
+		return {}
 	seq = ",".join(uids)
 	try:
 		typ, data = imap.uid('fetch', seq, '(RFC822 FLAGS)')
