@@ -1,44 +1,23 @@
 # imap-notion-sync
 
-🔄 **Sincronizzazione automatica di email IMAP verso Notion**
+Sincronizza automaticamente le email da un server IMAP verso un database Notion.
 
-Un'applicazione Docker che estrae email da un server IMAP e sincronizza automaticamente tutti i messaggi in un database Notion. Perfetto per archiviare, organizzare e tenere traccia delle email importanti.
+Questo repository fornisce un'applicazione Docker che legge messaggi IMAP, estrae metadati e crea pagine in un database Notion per tracciare e archiviare le email.
 
-## 🎯 Funzionalità
+**Principali vantaggi**
+- Sincronizzazione automatica in batch
+- Gestione dei metadati (mittente, oggetto, data, message-id)
+- Compatibilità con HTML/quoted-printable e charset multipli
+- Plugin runtime per personalizzare il filtering senza ricostruire l'immagine
 
-- **Connessione IMAP**: Accesso sicuro a qualsiasi server IMAP (Gmail, Outlook, etc.)
-- **Sincronizzazione completa**: Importa tutte le email con i metadati
-- **Estrazione metadati**: Recupera automaticamente mittente, oggetto, data e corpo
-- **Sincronizzazione Notion**: Crea pagine nel database Notion per ogni email
-- **Rate limiting**: Gestisce automaticamente i limiti di API di Notion
-- **Batch processing**: Elabora le email in batch per migliore performance
-- **Filtro temporale**: Sincronizza solo le email degli ultimi N giorni configurabili
+**Nota**: il README è in italiano; se preferisci una versione in inglese posso aggiungerla.
 
-## 📋 Requisiti
+**Quick Start**
+- **Prerequisiti**: `docker`, `docker-compose`, account Notion e accesso IMAP.
+- Crea un file `.env` con le variabili minime (vedi sotto).
+- Avvia con `docker run` o `docker-compose up -d`.
 
-- Docker e Docker Compose
-- Account Notion con database configurato
-- Server IMAP accessibile
-- Token di autenticazione Notion
-
-## 🚀 Installazione e Utilizzo
-
-### 1. Configurazione del Database Notion
-
-Crea un database in Notion con le seguenti proprietà:
-
-| Proprietà | Tipo | Descrizione |
-|-----------|------|-------------|
-| Subject | Title | Oggetto dell'email |
-| From | Rich Text | Mittente |
-| Body | Rich Text | Corpo dell'email |
-| Message-ID | Rich Text | ID univoco email |
-| Email Date | Date | Data ricezione |
-
-### 2. Variabili di Ambiente
-
-Crea un file `.env` con le seguenti variabili:
-
+**Essenziali (.env example)**
 ```env
 # Notion
 NOTION_TOKEN=your_notion_token_here
@@ -50,246 +29,54 @@ IMAP_PORT=993
 IMAP_USER=your_email@gmail.com
 IMAP_PASSWORD=your_app_password
 
-# Configurazione
-IMAP_FOLDERS=INBOX,Spedizioni
+# Config
+IMAP_FOLDERS=INBOX
 SYNC_SINCE_DAYS=30
 BATCH_SIZE=50
+POLL_INTERVAL=60
+LOG_LEVEL=INFO
 ```
 
-#### Come ottenere le credenziali:
+**Database Notion (consigliato)**
+- Crea un database con queste proprietà base:
+  - `Subject` (Title)
+  - `From` (Rich Text)
+  - `Body` (Rich Text)
+  - `Message-ID` (Rich Text)
+  - `Email Date` (Date)
 
-**Notion Token:**
-1. Vai a https://www.notion.so/my-integrations
-2. Crea una nuova integrazione
-3. Copia il token da "Internal Integration Secret"
-4. Aggiungi l'integrazione al tuo database Notion
-
-**Database ID:**
-- Apri il tuo database in Notion
-- L'ID è visibile nell'URL: `https://www.notion.so/[ID]?v=...`
-
-**IMAP Credentials:**
-- Per Gmail: usa la password di app (2FA richiesto)
-- Per altri provider: usa le credenziali standard IMAP
-
-### 3. Esecuzione con Docker
-
-#### Docker diretto
-
+**Uso Docker (rapido)**
+- Costruisci l'immagine:
 ```bash
-# Build dell'immagine
 docker build -t ghcr.io/carminelau/imap-notion-sync:latest .
-
-# Run del container
+```
+- Esegui con `.env`:
+```bash
 docker run --env-file .env ghcr.io/carminelau/imap-notion-sync:latest
 ```
 
-#### Docker Compose - Versione con .env
-
-Usa il file `.env` per le variabili (scelta consigliata per la sicurezza):
-
-**docker-compose.yml:**
+**Docker Compose (consigliato: usa `.env`)**
+Esempio minimo `docker-compose.yml`:
 ```yaml
-version: '3.8'
-
 services:
   imap-notion-sync:
     build: .
-    container_name: ghcr.io/carminelau/imap-notion-sync:latest
     env_file: .env
-    restart: no
-    networks:
-      - sync-network
-
-networks:
-  sync-network:
-    driver: bridge
+    restart: "no"
 ```
 
-**.env:**
-```env
-NOTION_TOKEN=your_notion_token_here
-LINE_ITEMS_DATABASE_ID=your_database_id_here
-IMAP_HOST=imap.gmail.com
-IMAP_PORT=993
-IMAP_USER=your_email@gmail.com
-IMAP_PASSWORD=your_app_password
-IMAP_FOLDERS=INBOX,Spedizioni
-SYNC_SINCE_DAYS=30
-BATCH_SIZE=50
-```
-
-Esecuzione:
+Avvio:
 ```bash
 docker-compose up -d
 ```
 
-#### Docker Compose - Versione con parametri in chiaro
+Sicurezza: evita di inserire token/credenziali in chiaro nel `docker-compose.yml` in produzione; usa sempre `.env` o secret manager.
 
-Se preferisci specifiche tutto nel compose (meno sicuro, non usare in produzione):
+**Plugin runtime (personalizzare senza rebuild)**
+- Puoi fornire un modulo plugin che implementa `should_create_page(meta, body)` e montarlo nel container.
+- File di esempio inclusi: `start_with_plugin.py` e `custom_filter.py`.
 
-**docker-compose.yml:**
-```yaml
-version: '3.8'
-
-services:
-  imap-notion-sync:
-    build: .
-    container_name: ghcr.io/carminelau/imap-notion-sync:latest
-    environment:
-      # Notion
-      NOTION_TOKEN: your_notion_token_here
-      LINE_ITEMS_DATABASE_ID: your_database_id_here
-      
-      # IMAP
-      IMAP_HOST: imap.gmail.com
-      IMAP_PORT: "993"
-      IMAP_USER: your_email@gmail.com
-      IMAP_PASSWORD: your_app_password
-      
-      # Configurazione
-      IMAP_FOLDERS: "INBOX,Spedizioni"
-      SYNC_SINCE_DAYS: "30"
-      BATCH_SIZE: "50"
-    
-    restart: no
-    networks:
-      - sync-network
-
-networks:
-  sync-network:
-    driver: bridge
-```
-
-Esecuzione:
-```bash
-docker-compose up -d
-```
-
-⚠️ **Nota sulla sicurezza**: La versione con parametri in chiaro nel compose espone le credenziali nel file. Usa sempre la versione con `.env` in produzione!
-
-## 🔧 Come Funziona
-
-### Flusso di Sincronizzazione
-
-1. **Connessione IMAP**: Si connette al server IMAP con SSL/TLS
-2. **Ricerca Email**: Cerca email dal numero di giorni configurato
-3. **Elaborazione Batch**: Scarica le email in batch per performance
-4. **Parsing Email**:
-   - Estrae il Message-ID
-   - Decodifica il corpo (plain text o HTML)
-   - Parsa i metadati (Mittente, Oggetto, Data, etc.)
-5. **Sincronizzazione Notion**: 
-   - Crea una nuova pagina per ogni email nel database
-
-### Decodifica Automatica
-
-L'applicazione gestisce automaticamente:
-
-- **Quoted-Printable**: Email codificate QP
-- **HTML Content**: Converte HTML a testo pulito
-- **Multiple Charsets**: UTF-8, ISO-8859-1, e altri
-- **Multipart Messages**: Email con testo e allegati
-
-## 📊 Configurazioni Avanzate
-
-### IMAP_FOLDERS
-Specifica le cartelle IMAP da sincronizzare (default: `INBOX`):
-```env
-IMAP_FOLDERS=INBOX,Spedizioni,Archivio
-```
-
-### SYNC_SINCE_DAYS
-Numero di giorni indietro da cui sincronizzare (default: `30`):
-```env
-SYNC_SINCE_DAYS=7  # Ultimi 7 giorni
-```
-
-### BATCH_SIZE
-Numero di email da elaborare per batch (default: `50`):
-```env
-BATCH_SIZE=100  # Batch più grandi
-```
-
-## 🐛 Troubleshooting
-
-### "Connection refused" - IMAP
-- Verifica che l'host IMAP sia raggiungibile
-- Controlla la porta (di solito 993 per IMAPS)
-- Verifica che il firewall non blocchi la connessione
-
-### "Authentication failed" - IMAP
-- Verifica username e password
-- Per Gmail, assicurati di usare una password di app (non la password dell'account)
-- Verifica che IMAP sia abilitato nel server
-
-### "Invalid token" - Notion
-- Verifica il token in https://www.notion.so/my-integrations
-- Assicurati che l'integrazione sia aggiunta al database
-- Il token scade? Generane uno nuovo
-
-### Nessuna email sincronizzata
-- Verifica che il database Notion esista e sia raggiungibile
-- Controlla che le variabili di ambiente siano corrette
-- Verifica i log del container per errori di parsing
-
-## 🔁 Always-on / Polling
-
-Per mantenere il container sempre attivo e far sì che controlli periodicamente la posta in arrivo puoi usare la modalità "always-on" (default il comportamento è di polling continuo). Imposta la variabile:
-
-```env
-POLL_INTERVAL=60  # secondi tra un controllo e l'altro (default 60)
-```
-
-Comportamento:
-- Al primo avvio il sistema sincronizza i messaggi degli ultimi `SYNC_SINCE_DAYS` giorni.
-- Successivamente mantiene un timestamp `last_sync` per ogni cartella e chiede solo le email arrivate dopo quell'istante.
-- Il container resta attivo e fa il ciclo: connect -> process -> logout -> sleep `POLL_INTERVAL` -> repeat.
-
-Nota: se preferisci ricevere nuove email in tempo reale puoi valutare l'uso di IMAP IDLE o librerie come `imapclient` che offrono supporto IDLE più robusto; al momento lo script esegue polling per massima compatibilità.
-
-## 📝 Decodifica Email
-
-L'applicazione gestisce automaticamente:
-
-- **Quoted-Printable**: Email codificate QP
-- **HTML Content**: Converte HTML a testo pulito
-- **Multiple Charsets**: UTF-8, ISO-8859-1, e altri
-- **Multipart Messages**: Email con testo e allegati
-
-## 📦 Dipendenze
-
-- `notion-client`: Client Python ufficiale di Notion
-- `beautifulsoup4`: Parsing HTML
-- Standard library: `imaplib`, `email`, `ssl`
-
-## 📄 Licenza
-
-MIT License - Vedi LICENSE per dettagli
-
-## 🤝 Contributi
-
-Segnala bug e suggerimenti come issues!
-
----
-
-**Nota**: Questa applicazione è progettata per sincronizzare email generiche. Personalizza il database Notion in base alle tue esigenze specifiche.
-
-## ⚙️ Personalizzare il filtering senza build (plugin runtime)
-
-Se vuoi permettere ad altri di personalizzare il comportamento di importazione senza dover ricostruire l'immagine Docker, è possibile fornire un piccolo plugin Python che il container carica a runtime.
-
-Abbiamo incluso due file di esempio nel repository:
-
-- `start_with_plugin.py` — wrapper che carica il modulo plugin (di default `custom_filter`) e sostituisce la funzione `create_email_page` per chiamare il plugin prima di creare la pagina su Notion.
-- `custom_filter.py` — esempio di plugin con vari helper (keyword, regex, whitelist/blacklist, esempio di override proprietà).
-
-Come funziona
-- Il plugin espone la funzione `should_create_page(meta, body)` che riceve i metadati dell'email e il corpo. Deve restituire `True` per creare la pagina, `False` o `None` per saltarla, oppure un `dict` (se si desidera estendere il wrapper per applicare override delle proprietà Notion).
-- Il wrapper `start_with_plugin.py` monta il plugin e avvia `app.main()`; in caso di errori del plugin il wrapper può ripristinare il comportamento default.
-
-Esempio: avvio rapido con `docker run` (nessuna build richiesta)
-
+Esempio `docker run` che monta il plugin:
 ```bash
 docker run --env-file .env --name imap-custom \
   -v "$PWD/custom_filter.py":/app/custom_filter.py:ro \
@@ -297,8 +84,7 @@ docker run --env-file .env --name imap-custom \
   --entrypoint python ghcr.io/carminelau/imap-notion-sync:latest /app/start_with_plugin.py
 ```
 
-Esempio `docker-compose`:
-
+Esempio `docker-compose` (plugin):
 ```yaml
 version: "3.8"
 services:
@@ -311,46 +97,54 @@ services:
     entrypoint: ["python","/app/start_with_plugin.py"]
 ```
 
-Opzioni avanzate
-- `CUSTOM_FILTER_MODULE`: imposta il nome del modulo plugin se non vuoi usare `custom_filter.py` (es. `MY_FILTER_MODULE=myplugin`).
-- `properties_override`: il plugin può restituire un `dict` con istruzioni (es. `{"create": True, "properties_override": {...}}`); per usarlo il wrapper deve essere adattato per applicare gli override.
+Opzioni utili per plugin:
+- `CUSTOM_FILTER_MODULE`: nome del modulo plugin (default `custom_filter`).
+- il plugin può restituire `dict` con `properties_override` se il wrapper è adattato per applicarle.
 
-Avvertenze
-- Il codice del plugin viene eseguito nel container e ha accesso ai segreti (es. `NOTION_TOKEN`): non eseguire plugin non affidabili.
-- Se l'immagine base cambia molto, il wrapper potrebbe necessitare aggiornamenti (testare dopo aggiornamenti dell'immagine).
+**Come funziona (breve)**
+- Connessione IMAP (SSL/TLS)
+- Ricerca mail a partire da `SYNC_SINCE_DAYS` o dall'ultima sincronizzazione
+- Download in batch e parsing (multipart, charset, QP, HTML)
+- Creazione pagina Notion per ogni messaggio (con gestione rate-limit)
 
-Se vuoi, posso aggiornare il wrapper per applicare automaticamente `properties_override` restituiti dal plugin e aggiungere esempi su come modificare le proprietà inviate a Notion.
+Segnalazione: l'implementazione filtra i messaggi usando UID quando possibile e verifica `INTERNALDATE` per assicurare il rispetto di `SYNC_SINCE_DAYS`.
 
-## 📣 Visualizzare i log Docker
+**Configurazioni avanzate**
+- `IMAP_FOLDERS`: cartelle da sincronizzare (es. `INBOX,Spedizioni`)
+- `SYNC_SINCE_DAYS`: quanti giorni indietro sincronizzare
+- `BATCH_SIZE`: numero di email per batch
+- `POLL_INTERVAL`: secondi tra controlli
 
-Di seguito i comandi utili per leggere i log del container e debug tramite `docker logs`.
+**Troubleshooting rapida**
+- "Connection refused": controlla host/porta/firewall
+- "Authentication failed": verifica credenziali e password app (Gmail)
+- "Invalid token" (Notion): verifica integrazione e token
+- Nessuna email sincronizzata: verifica variabili `.env` e log del container
 
-- Se hai avviato con `docker-compose` (usa il nome del servizio o del container):
-
+Comandi utili per log:
 ```bash
-# Vedi i log del servizio in background
+docker logs -f imap-notion-sync
 docker-compose logs -f imap-notion-sync
-
-# Oppure, se preferisci il nome del container
-docker logs -f imap-notion-sync
-```
-
-- Se hai avviato con `docker run` (container chiamato `imap-notion-sync`):
-
-```bash
-docker logs -f imap-notion-sync
-```
-
-- Mostrare gli ultimi N record dei log:
-
-```bash
 docker logs --tail 200 imap-notion-sync
-```
-
-- Se vuoi filtrare o cercare testo specifico nei log (es. error):
-
-```bash
 docker logs imap-notion-sync 2>&1 | grep -i error
 ```
 
-Consiglio: imposta `LOG_LEVEL=DEBUG` nel tuo `.env` per maggiori dettagli mentre fai troubleshooting.
+Consiglio: imposta `LOG_LEVEL=DEBUG` per debug più dettagliato.
+
+**Dipendenze principali**
+- `notion-client` (client Notion)
+- `beautifulsoup4` (HTML -> testo)
+- Standard library: `imaplib`, `email`, `ssl`
+
+**Licenza & Contribuire**
+- Licenza: MIT (vedi `LICENSE`)
+- Contribuzioni: apri issue o PR; suggerimenti e bug sono benvenuti.
+
+---
+
+Se vuoi posso:
+- aggiungere una versione in inglese
+- estrarre la sezione "Plugin" in un file separato `PLUGIN.md`
+- includere esempi `custom_filter.py` più completi
+
+Fammi sapere quale di queste preferisci e aggiorno il README ancora.
