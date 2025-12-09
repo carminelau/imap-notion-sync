@@ -78,10 +78,10 @@ BATCH_SIZE=50
 
 ```bash
 # Build dell'immagine
-docker build -t imap-notion-sync .
+docker build -t ghcr.io/carminelau/imap-notion-sync:latest .
 
 # Run del container
-docker run --env-file .env imap-notion-sync
+docker run --env-file .env ghcr.io/carminelau/imap-notion-sync:latest
 ```
 
 #### Docker Compose - Versione con .env
@@ -95,7 +95,7 @@ version: '3.8'
 services:
   imap-notion-sync:
     build: .
-    container_name: imap-notion-sync
+    container_name: ghcr.io/carminelau/imap-notion-sync:latest
     env_file: .env
     restart: no
     networks:
@@ -135,7 +135,7 @@ version: '3.8'
 services:
   imap-notion-sync:
     build: .
-    container_name: imap-notion-sync
+    container_name: ghcr.io/carminelau/imap-notion-sync:latest
     environment:
       # Notion
       NOTION_TOKEN: your_notion_token_here
