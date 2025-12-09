@@ -1,5 +1,6 @@
 # app.py
-import os, ssl, time, email, re, json
+import os, ssl, time, email, re, json, sys
+import logging
 from datetime import datetime, timezone, timedelta
 from imaplib import IMAP4_SSL
 from html import unescape
@@ -18,6 +19,11 @@ SINCE_DAYS = int(os.environ.get("SYNC_SINCE_DAYS", "30"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
 
 notion = Client(auth=NOTION_TOKEN)
+
+# Logging
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(stream=sys.stdout, level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("imap-notion-sync")
 
 # --- Utils di decodifica ---
 def qp_decode(s: bytes|str, charset="utf-8"):
@@ -114,7 +120,12 @@ def create_email_page(msgid, sender, subject, dt, text):
 		"Body": {"rich_text":[{"type":"text","text":{"content": text}}]} if text else {"rich_text":[]},
 		"Email Date": {"date":{"start": dt.astimezone(timezone.utc).isoformat()}},
 	}
-	notion.pages.create(parent={"database_id": LINE_DB_ID}, properties=props)
+	try:
+		logger.debug("Creating Notion page for Message-ID=%s Subject=%s", (msgid or "" )[:80], (subject or "")[:80])
+		page = notion.pages.create(parent={"database_id": LINE_DB_ID}, properties=props)
+		logger.info("Notion page created: %s", page.get("id") if isinstance(page, dict) else "(unknown)")
+	except Exception:
+		logger.exception("Failed to create Notion page for Message-ID=%s", msgid)
 
 # --- Parse headers minimi ---
 def parse_email_metadata(raw_bytes):
@@ -130,28 +141,43 @@ def parse_email_metadata(raw_bytes):
 	date_tuple = email.utils.parsedate_tz(m.get("Date"))
 	dt = datetime.fromtimestamp(email.utils.mktime_tz(date_tuple), tz=timezone.utc) if date_tuple else datetime.now(timezone.utc)
 	text, _ = get_best_body(m)
+	logger.debug("Parsed email headers: Message-ID=%s From=%s Subject=%s Date=%s", (msgid or "")[:80], (sender or "")[:80], (subject or "")[:80], dt.isoformat())
 	return msgid, sender, subject, dt, text
 
 # --- Main ---
 def main():
+	logger.info("Starting imap-notion-sync")
 	context = ssl.create_default_context()
 	since_date = (datetime.now(timezone.utc) - timedelta(days=SINCE_DAYS)).astimezone(timezone.utc)
-	with IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=context) as imap:
-		imap.login(IMAP_USER, IMAP_PASSWORD)
-		for folder in FOLDERS:
-			uids = imap_search_since(imap, folder, since_date)
-			for i in range(0, len(uids), BATCH_SIZE):
-				batch = uids[i:i+BATCH_SIZE]
-				results = fetch_batch(imap, batch)
-				for uid in batch:
-					item = results.get(uid)
-					if not item:
-						continue
-					msgid, sender, subject, dt, text = parse_email_metadata(item["raw"])
-					if text:
-						create_email_page(msgid, sender, subject, dt, text)
-						time.sleep(0.1)  # rate-limit Notion
-		imap.logout()
+	try:
+		logger.info("Connecting to IMAP %s:%s", IMAP_HOST, IMAP_PORT)
+		with IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=context) as imap:
+			imap.login(IMAP_USER, IMAP_PASSWORD)
+			logger.info("IMAP login successful for user %s", IMAP_USER)
+			for folder in FOLDERS:
+				uids = imap_search_since(imap, folder, since_date)
+				logger.info("Folder '%s' has %d messages since %s", folder, len(uids), since_date.date().isoformat())
+				for i in range(0, len(uids), BATCH_SIZE):
+					batch = uids[i:i+BATCH_SIZE]
+					logger.info("Processing batch %d: %d messages", (i // BATCH_SIZE) + 1, len(batch))
+					results = fetch_batch(imap, batch)
+					for uid in batch:
+						item = results.get(uid)
+						if not item:
+							logger.warning("No data for uid %s (skipping)", uid)
+							continue
+						try:
+							msgid, sender, subject, dt, text = parse_email_metadata(item["raw"])
+							if text:
+								logger.debug("Creating page for Message-ID=%s", (msgid or "")[:80])
+								create_email_page(msgid, sender, subject, dt, text)
+								time.sleep(0.1)  # rate-limit Notion
+						except Exception:
+							logger.exception("Failed processing uid %s", uid)
+			imap.logout()
+			logger.info("IMAP logout complete")
+	except Exception:
+		logger.exception("Unhandled exception in main loop")
 
 if __name__ == "__main__":
 	main()
