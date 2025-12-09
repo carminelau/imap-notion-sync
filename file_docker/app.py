@@ -86,29 +86,48 @@ def imap_search_since(imap, folder, since_date):
 
 def fetch_batch(imap, uids):
 	if not uids: return {}
+	# Use UID FETCH to make sure we're fetching by UID (search returns UIDs on many servers)
 	seq = ",".join(uids)
-	typ, data = imap.fetch(seq, "(RFC822 FLAGS UID)")
-	if typ != "OK" or not data: return {}
+	try:
+		typ, data = imap.uid('fetch', seq, '(RFC822 FLAGS)')
+		if typ != "OK" or not data:
+			logger.warning("Empty fetch response for seq=%s (typ=%s)", seq, typ)
+			return {}
+	except Exception:
+		logger.exception("UID fetch failed for seq=%s", seq)
+		return {}
+
 	out = {}
-	cur_uid = None; cur_flags = []
 	for item in data:
 		if not isinstance(item, tuple):
 			continue
 		header = item[0].decode(errors="ignore")
-		if "UID " in header:
+		# Try to extract UID from the response (e.g. '... UID 395 ...')
+		m = re.search(r"UID\s+(\d+)", header)
+		if m:
+			cur_uid = m.group(1)
+		else:
+			# Fallback: first token is often the id we requested
 			try:
-				cur_uid = header.split("UID ")[1].split()[0]
+				cur_uid = header.split()[0]
 			except Exception:
 				cur_uid = None
-		if b"FLAGS" in item[0]:
+
+		# Extract FLAGS if present
+		cur_flags = []
+		if "FLAGS (" in header:
 			try:
 				flags_part = header.split("FLAGS (",1)[1].split(")",1)[0]
 				cur_flags = flags_part.split()
 			except Exception:
 				cur_flags = []
+
 		raw = item[1]
 		if cur_uid:
-			out[cur_uid] = {"raw": raw, "flags": cur_flags[:] }
+			out[cur_uid] = {"raw": raw, "flags": cur_flags[:]}
+		else:
+			logger.debug("Could not determine UID for fetch item header: %s", header[:200])
+
 	return out
 
 # --- Notion: inserimento email ---

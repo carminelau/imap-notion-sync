@@ -259,3 +259,37 @@ Segnala bug e suggerimenti come issues!
 ---
 
 **Nota**: Questa applicazione è progettata per sincronizzare email generiche. Personalizza il database Notion in base alle tue esigenze specifiche.
+
+## 📣 Visualizzare i log Docker
+
+Di seguito i comandi utili per leggere i log del container e debug tramite `docker logs`.
+
+- Se hai avviato con `docker-compose` (usa il nome del servizio o del container):
+
+```bash
+# Vedi i log del servizio in background
+docker-compose logs -f imap-notion-sync
+
+# Oppure, se preferisci il nome del container
+docker logs -f imap-notion-sync
+```
+
+- Se hai avviato con `docker run` (container chiamato `imap-notion-sync`):
+
+```bash
+docker logs -f imap-notion-sync
+```
+
+- Mostrare gli ultimi N record dei log:
+
+```bash
+docker logs --tail 200 imap-notion-sync
+```
+
+- Se vuoi filtrare o cercare testo specifico nei log (es. error):
+
+```bash
+docker logs imap-notion-sync 2>&1 | grep -i error
+```
+
+Consiglio: imposta `LOG_LEVEL=DEBUG` nel tuo `.env` per maggiori dettagli mentre fai troubleshooting.
