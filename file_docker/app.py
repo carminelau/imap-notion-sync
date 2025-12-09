@@ -18,6 +18,8 @@ FOLDERS = [f.strip() for f in os.environ.get("IMAP_FOLDERS", "INBOX").split(",")
 SINCE_DAYS = int(os.environ.get("SYNC_SINCE_DAYS", "30"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))  # seconds between polls when running continuously
+PROCESSED_STORE_PATH = os.environ.get("PROCESSED_STORE_PATH", "./processed.json")
+SEEN_MAX = int(os.environ.get("SEEN_MAX", "10000"))
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -72,6 +74,51 @@ def get_best_body(msg) -> tuple[str,str]:
 			html = txt
 	text = plain or html_to_text(html)
 	return text, html
+
+
+# --- Duplicate persistence (simple file store) ---
+def load_store(path: str) -> dict:
+	try:
+		with open(path, "r", encoding="utf-8") as f:
+			return json.load(f)
+	except Exception:
+		return {"folders": {}, "msgids": []}
+
+def save_store(path: str, store: dict):
+	try:
+		tmp = path + ".tmp"
+		with open(tmp, "w", encoding="utf-8") as f:
+			json.dump(store, f)
+		os.replace(tmp, path)
+	except Exception:
+		logger.exception("Failed saving processed store to %s", path)
+
+def is_seen(store: dict, uid: str, msgid: str, folder: str) -> bool:
+	if msgid:
+		if msgid in store.get("msgids", []):
+			return True
+	fdata = store.setdefault("folders", {})
+	ulist = fdata.setdefault(folder, {}).get("uids", [])
+	if uid and uid in ulist:
+		return True
+	return False
+
+def mark_seen(store: dict, uid: str, msgid: str, folder: str):
+	fdata = store.setdefault("folders", {})
+	folder_entry = fdata.setdefault(folder, {})
+	ulist = folder_entry.setdefault("uids", [])
+	if uid and (not ulist or ulist[-1] != uid):
+		ulist.append(uid)
+	if msgid:
+		mids = store.setdefault("msgids", [])
+		if not mids or mids[-1] != msgid:
+			mids.append(msgid)
+	# trim
+	if len(ulist) > SEEN_MAX:
+		folder_entry["uids"] = ulist[-SEEN_MAX:]
+	mids = store.get("msgids", [])
+	if len(mids) > SEEN_MAX:
+		store["msgids"] = mids[-SEEN_MAX:]
 
 # --- IMAP ---
 def imap_search_since(imap, folder, since_date):
@@ -265,6 +312,10 @@ def main():
 	logger.info("Starting imap-notion-sync (continuous mode: poll interval=%ss)", POLL_INTERVAL)
 	context = ssl.create_default_context()
 
+	# Load processed store (keeps track of seen Message-IDs and UIDs to avoid duplicates)
+	store = load_store(PROCESSED_STORE_PATH)
+	logger.debug("Loaded processed store from %s: folders=%d msgids=%d", PROCESSED_STORE_PATH, len(store.get("folders", {})), len(store.get("msgids", [])))
+
 	# Initialize last sync timestamps per folder (first run: SYNC_SINCE_DAYS back)
 	last_sync = {}
 	now = datetime.now(timezone.utc)
@@ -298,9 +349,19 @@ def main():
 								continue
 							try:
 								msgid, sender, subject, dt, text = parse_email_metadata(item["raw"])
+								# Dedup: skip if we've already processed this Message-ID or UID
+								if is_seen(store, uid, msgid, folder):
+									logger.info("Skipping already-processed message uid=%s msgid=%s", uid, (msgid or "")[:80])
+									continue
 								if text:
 									logger.debug("Creating page for Message-ID=%s", (msgid or "")[:80])
 									create_email_page(msgid, sender, subject, dt, text)
+									# mark as processed and persist
+									try:
+										mark_seen(store, uid, msgid, folder)
+										save_store(PROCESSED_STORE_PATH, store)
+									except Exception:
+										logger.exception("Failed marking message seen for uid=%s", uid)
 									time.sleep(0.1)  # rate-limit Notion
 							except Exception:
 								logger.exception("Failed processing uid %s", uid)
