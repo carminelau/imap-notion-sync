@@ -79,11 +79,29 @@ def imap_search_since(imap, folder, since_date):
 	if typ != "OK":
 		return []
 	crit = since_date.strftime("%d-%b-%Y")
+	# Prefer UID SEARCH so results are UIDs compatible with later `uid('fetch', ...)`.
+	# Some servers/clients return sequence numbers for `search()` which would
+	# not match `uid('fetch', ...)` and cause fetching of wrong messages.
+	try:
+		typ, data = imap.uid('search', None, 'SINCE', crit)
+		if typ == 'OK' and data and data[0]:
+			uids = data[0].split()
+			decoded = [uid.decode() for uid in uids]
+			logger.debug("UID search returned %d ids (sample: %s)", len(decoded), decoded[:5])
+			return decoded
+		else:
+			logger.debug("UID search returned no data or non-OK: typ=%s", typ)
+	except Exception:
+		logger.debug("UID search failed, falling back to sequence SEARCH", exc_info=True)
+
+	# Fallback: sequence-based SEARCH (keep backwards compatibility).
 	typ, data = imap.search(None, "SINCE", crit)
 	if typ != "OK":
 		return []
 	uids = data[0].split() if data and data[0] else []
-	return [uid.decode() for uid in uids]
+	decoded = [uid.decode() for uid in uids]
+	logger.debug("Sequence search returned %d ids (sample: %s)", len(decoded), decoded[:5])
+	return decoded
 
 def fetch_batch(imap, uids):
 	if not uids: return {}
