@@ -275,6 +275,52 @@ Segnala bug e suggerimenti come issues!
 
 **Nota**: Questa applicazione è progettata per sincronizzare email generiche. Personalizza il database Notion in base alle tue esigenze specifiche.
 
+## ⚙️ Personalizzare il filtering senza build (plugin runtime)
+
+Se vuoi permettere ad altri di personalizzare il comportamento di importazione senza dover ricostruire l'immagine Docker, è possibile fornire un piccolo plugin Python che il container carica a runtime.
+
+Abbiamo incluso due file di esempio nel repository:
+
+- `start_with_plugin.py` — wrapper che carica il modulo plugin (di default `custom_filter`) e sostituisce la funzione `create_email_page` per chiamare il plugin prima di creare la pagina su Notion.
+- `custom_filter.py` — esempio di plugin con vari helper (keyword, regex, whitelist/blacklist, esempio di override proprietà).
+
+Come funziona
+- Il plugin espone la funzione `should_create_page(meta, body)` che riceve i metadati dell'email e il corpo. Deve restituire `True` per creare la pagina, `False` o `None` per saltarla, oppure un `dict` (se si desidera estendere il wrapper per applicare override delle proprietà Notion).
+- Il wrapper `start_with_plugin.py` monta il plugin e avvia `app.main()`; in caso di errori del plugin il wrapper può ripristinare il comportamento default.
+
+Esempio: avvio rapido con `docker run` (nessuna build richiesta)
+
+```bash
+docker run --env-file .env --name imap-custom \
+  -v "$PWD/custom_filter.py":/app/custom_filter.py:ro \
+  -v "$PWD/start_with_plugin.py":/app/start_with_plugin.py:ro \
+  --entrypoint python ghcr.io/carminelau/imap-notion-sync:latest /app/start_with_plugin.py
+```
+
+Esempio `docker-compose`:
+
+```yaml
+version: "3.8"
+services:
+  imap-notion-sync:
+    image: ghcr.io/carminelau/imap-notion-sync:latest
+    env_file: .env
+    volumes:
+      - ./custom_filter.py:/app/custom_filter.py:ro
+      - ./start_with_plugin.py:/app/start_with_plugin.py:ro
+    entrypoint: ["python","/app/start_with_plugin.py"]
+```
+
+Opzioni avanzate
+- `CUSTOM_FILTER_MODULE`: imposta il nome del modulo plugin se non vuoi usare `custom_filter.py` (es. `MY_FILTER_MODULE=myplugin`).
+- `properties_override`: il plugin può restituire un `dict` con istruzioni (es. `{"create": True, "properties_override": {...}}`); per usarlo il wrapper deve essere adattato per applicare gli override.
+
+Avvertenze
+- Il codice del plugin viene eseguito nel container e ha accesso ai segreti (es. `NOTION_TOKEN`): non eseguire plugin non affidabili.
+- Se l'immagine base cambia molto, il wrapper potrebbe necessitare aggiornamenti (testare dopo aggiornamenti dell'immagine).
+
+Se vuoi, posso aggiornare il wrapper per applicare automaticamente `properties_override` restituiti dal plugin e aggiungere esempi su come modificare le proprietà inviate a Notion.
+
 ## 📣 Visualizzare i log Docker
 
 Di seguito i comandi utili per leggere i log del container e debug tramite `docker logs`.

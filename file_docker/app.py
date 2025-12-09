@@ -175,6 +175,9 @@ def main():
 	initial_since = (now - timedelta(days=SINCE_DAYS)).astimezone(timezone.utc)
 	for f in FOLDERS:
 		last_sync[f] = initial_since
+  
+	# print the last_sync dict 
+	logger.info("Initial Last Sync timestamps per folder: %s", {k: v.isoformat() for k,v in last_sync.items()})
 
 	while True:
 		try:
@@ -218,6 +221,7 @@ def main():
 		except Exception:
 			logger.exception("Unhandled exception during IMAP poll cycle - will retry after sleep")
 
+		logger.info("Last Sync timestamps per folder: %s", {k: v.isoformat() for k,v in last_sync.items()})
 		# Sleep before next poll (keeps container alive)
 		logger.info("Sleeping %s seconds before next poll", POLL_INTERVAL)
 		time.sleep(POLL_INTERVAL)
