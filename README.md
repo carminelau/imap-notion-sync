@@ -233,6 +233,21 @@ BATCH_SIZE=100  # Batch più grandi
 - Controlla che le variabili di ambiente siano corrette
 - Verifica i log del container per errori di parsing
 
+## 🔁 Always-on / Polling
+
+Per mantenere il container sempre attivo e far sì che controlli periodicamente la posta in arrivo puoi usare la modalità "always-on" (default il comportamento è di polling continuo). Imposta la variabile:
+
+```env
+POLL_INTERVAL=60  # secondi tra un controllo e l'altro (default 60)
+```
+
+Comportamento:
+- Al primo avvio il sistema sincronizza i messaggi degli ultimi `SYNC_SINCE_DAYS` giorni.
+- Successivamente mantiene un timestamp `last_sync` per ogni cartella e chiede solo le email arrivate dopo quell'istante.
+- Il container resta attivo e fa il ciclo: connect -> process -> logout -> sleep `POLL_INTERVAL` -> repeat.
+
+Nota: se preferisci ricevere nuove email in tempo reale puoi valutare l'uso di IMAP IDLE o librerie come `imapclient` che offrono supporto IDLE più robusto; al momento lo script esegue polling per massima compatibilità.
+
 ## 📝 Decodifica Email
 
 L'applicazione gestisce automaticamente:

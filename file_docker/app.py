@@ -17,6 +17,7 @@ IMAP_PASSWORD = os.environ["IMAP_PASSWORD"]
 FOLDERS = [f.strip() for f in os.environ.get("IMAP_FOLDERS", "INBOX").split(",") if f.strip()]
 SINCE_DAYS = int(os.environ.get("SYNC_SINCE_DAYS", "30"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))  # seconds between polls when running continuously
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -165,38 +166,61 @@ def parse_email_metadata(raw_bytes):
 
 # --- Main ---
 def main():
-	logger.info("Starting imap-notion-sync")
+	logger.info("Starting imap-notion-sync (continuous mode: poll interval=%ss)", POLL_INTERVAL)
 	context = ssl.create_default_context()
-	since_date = (datetime.now(timezone.utc) - timedelta(days=SINCE_DAYS)).astimezone(timezone.utc)
-	try:
-		logger.info("Connecting to IMAP %s:%s", IMAP_HOST, IMAP_PORT)
-		with IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=context) as imap:
-			imap.login(IMAP_USER, IMAP_PASSWORD)
-			logger.info("IMAP login successful for user %s", IMAP_USER)
-			for folder in FOLDERS:
-				uids = imap_search_since(imap, folder, since_date)
-				logger.info("Folder '%s' has %d messages since %s", folder, len(uids), since_date.date().isoformat())
-				for i in range(0, len(uids), BATCH_SIZE):
-					batch = uids[i:i+BATCH_SIZE]
-					logger.info("Processing batch %d: %d messages", (i // BATCH_SIZE) + 1, len(batch))
-					results = fetch_batch(imap, batch)
-					for uid in batch:
-						item = results.get(uid)
-						if not item:
-							logger.warning("No data for uid %s (skipping)", uid)
-							continue
-						try:
-							msgid, sender, subject, dt, text = parse_email_metadata(item["raw"])
-							if text:
-								logger.debug("Creating page for Message-ID=%s", (msgid or "")[:80])
-								create_email_page(msgid, sender, subject, dt, text)
-								time.sleep(0.1)  # rate-limit Notion
-						except Exception:
-							logger.exception("Failed processing uid %s", uid)
-			imap.logout()
-			logger.info("IMAP logout complete")
-	except Exception:
-		logger.exception("Unhandled exception in main loop")
+
+	# Initialize last sync timestamps per folder (first run: SYNC_SINCE_DAYS back)
+	last_sync = {}
+	now = datetime.now(timezone.utc)
+	initial_since = (now - timedelta(days=SINCE_DAYS)).astimezone(timezone.utc)
+	for f in FOLDERS:
+		last_sync[f] = initial_since
+
+	while True:
+		try:
+			logger.info("Connecting to IMAP %s:%s", IMAP_HOST, IMAP_PORT)
+			with IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=context) as imap:
+				imap.login(IMAP_USER, IMAP_PASSWORD)
+				logger.info("IMAP login successful for user %s", IMAP_USER)
+
+				for folder in FOLDERS:
+					since_date = last_sync.get(folder, initial_since)
+					uids = imap_search_since(imap, folder, since_date)
+					logger.info("Folder '%s' has %d messages since %s", folder, len(uids), since_date.date().isoformat())
+
+					for i in range(0, len(uids), BATCH_SIZE):
+						batch = uids[i:i+BATCH_SIZE]
+						logger.info("Processing batch %d: %d messages", (i // BATCH_SIZE) + 1, len(batch))
+						results = fetch_batch(imap, batch)
+						for uid in batch:
+							item = results.get(uid)
+							if not item:
+								logger.warning("No data for uid %s (skipping)", uid)
+								continue
+							try:
+								msgid, sender, subject, dt, text = parse_email_metadata(item["raw"])
+								if text:
+									logger.debug("Creating page for Message-ID=%s", (msgid or "")[:80])
+									create_email_page(msgid, sender, subject, dt, text)
+									time.sleep(0.1)  # rate-limit Notion
+							except Exception:
+								logger.exception("Failed processing uid %s", uid)
+
+					# update last sync timestamp for the folder to now
+					last_sync[folder] = datetime.now(timezone.utc)
+
+				try:
+					imap.logout()
+					logger.info("IMAP logout complete")
+				except Exception:
+					logger.debug("Error during IMAP logout (continuing)")
+
+		except Exception:
+			logger.exception("Unhandled exception during IMAP poll cycle - will retry after sleep")
+
+		# Sleep before next poll (keeps container alive)
+		logger.info("Sleeping %s seconds before next poll", POLL_INTERVAL)
+		time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
 	main()
