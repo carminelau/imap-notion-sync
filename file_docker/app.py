@@ -1,6 +1,7 @@
 # app.py
 import os, ssl, time, email, re, json, sys
 import logging
+import requests
 from datetime import datetime, timezone, timedelta
 from imaplib import IMAP4_SSL
 from html import unescape
@@ -20,6 +21,12 @@ BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "50"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))  # seconds between polls when running continuously
 PROCESSED_STORE_PATH = os.environ.get("PROCESSED_STORE_PATH", "./processed.json")
 SEEN_MAX = int(os.environ.get("SEEN_MAX", "10000"))
+ATTACHMENTS_DIR = os.environ.get("ATTACHMENTS_DIR", "./attachments")
+# Optional: public base URL where saved attachments will be accessible.
+# If set, attachments will be added to Notion as `external` files using this base URL + filename.
+ATTACHMENTS_BASE_URL = os.environ.get("ATTACHMENTS_BASE_URL", "")
+NOTION_UPLOAD_FILES = os.environ.get("NOTION_UPLOAD_FILES", "false").lower() in ("1","true","yes")
+NOTION_VERSION = os.environ.get("NOTION_VERSION", "2025-09-03")
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -274,8 +281,118 @@ def fetch_batch(imap, uids):
 
 	return out
 
+
+def _safe_filename(name: str) -> str:
+    # Basic sanitization
+    name = name.replace("/", "_").replace("\\", "_")
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+
+
+def create_file_upload_object():
+	"""Create a Notion File Upload object (Step 1). Returns the JSON response containing `id` and `upload_url`."""
+	url = "https://api.notion.com/v1/file_uploads"
+	headers = {
+ 		"Authorization": f"Bearer {NOTION_TOKEN}",
+ 		"Notion-Version": NOTION_VERSION,
+ 		"Content-Type": "application/json",
+ 	}
+    
+	try:
+		resp = requests.post(url, headers=headers, json={})
+		resp.raise_for_status()
+		return resp.json()
+	except Exception:
+		logger.exception("Failed creating Notion file_upload object")
+		return None
+
+
+def send_file_to_upload_url(upload_url: str, file_bytes: bytes, filename: str):
+	"""Send file bytes to the upload_url returned by Notion (Step 2). Returns response JSON on success."""
+	headers = {
+		"Authorization": f"Bearer {NOTION_TOKEN}",
+		"Notion-Version": NOTION_VERSION,
+		# Do not set Content-Type -- requests will set multipart boundary
+	}
+	files = {"file": (filename, file_bytes)}
+	try:
+		resp = requests.post(upload_url, headers=headers, files=files)
+		resp.raise_for_status()
+		return resp.json()
+	except Exception:
+		logger.exception("Failed sending file to Notion upload_url %s", upload_url)
+		return None
+
+
+def upload_attachment_and_get_upload_id(file_bytes: bytes, filename: str):
+	"""High-level helper that performs Step 1 and Step 2 and returns the `file_upload.id` on success."""
+	obj = create_file_upload_object()
+	if not obj:
+		return None
+	upload_url = obj.get("upload_url")
+	upload_id = obj.get("id")
+	if not upload_url or not upload_id:
+		logger.error("Invalid file_upload object returned: %s", obj)
+		return None
+	resp = send_file_to_upload_url(upload_url, file_bytes, filename)
+	if not resp:
+		return None
+	if resp.get("status") != "uploaded":
+		logger.error("Notion upload did not return uploaded status: %s", resp)
+		return None
+	return upload_id
+
+
+def build_notion_file_entry_from_upload_id(upload_id: str, filename: str):
+	"""Return a Notion `files` property entry that references the uploaded file by id."""
+	return {"name": filename, "type": "file_upload", "file_upload": {"id": upload_id}}
+
+
+def save_attachments_and_get_urls(attachments: list, uid: str):
+	"""Save attachments to ATTACHMENTS_DIR and return list of dicts for Notion files.
+	If ATTACHMENTS_BASE_URL is set, return external URLs that can be used in Notion file property.
+	"""
+	if not attachments:
+		return []
+	os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+	files_for_notion = []
+	for a in attachments:
+		fn = a.get("filename") or f"attachment_{uid}"
+		safe = _safe_filename(fn)
+		# Prefix with uid to avoid collisions
+		out_name = f"{uid}_{safe}"
+		path = os.path.join(ATTACHMENTS_DIR, out_name)
+		data = a.get("data") or b""
+		# Save locally first (for persistence / fallback)
+		try:
+			with open(path, "wb") as f:
+				f.write(data)
+		except Exception:
+			logger.exception("Failed saving attachment %s", path)
+			continue
+
+		# If direct Notion upload enabled, try that first
+		if NOTION_UPLOAD_FILES:
+			try:
+				upload_id = upload_attachment_and_get_upload_id(data, out_name)
+				if upload_id:
+					files_for_notion.append(build_notion_file_entry_from_upload_id(upload_id, out_name))
+					# Uploaded and attached later when creating the page
+					continue
+			except Exception:
+				logger.exception("Notion direct upload failed for %s; falling back to external/local URL", out_name)
+
+		# If base URL provided, create external reference
+		if ATTACHMENTS_BASE_URL:
+			# Ensure trailing slash
+			base = ATTACHMENTS_BASE_URL.rstrip("/")
+			url = f"{base}/{out_name}"
+			files_for_notion.append({"name": out_name, "type": "external", "external": {"url": url}})
+		else:
+			logger.debug("Saved attachment to %s but no ATTACHMENTS_BASE_URL configured and NOTION_UPLOAD_FILES not enabled; not adding to Notion.", path)
+	return files_for_notion
+
 # --- Notion: inserimento email ---
-def create_email_page(msgid, sender, subject, dt, text):
+def create_email_page(msgid, sender, subject, dt, text, attachment_files=None):
 	props = {
 		"Message-ID": {"rich_text":[{"type":"text","text":{"content": msgid}}]} if msgid else {"rich_text":[]},
 		"From": {"rich_text":[{"type":"text","text":{"content": sender}}]} if sender else {"rich_text":[]},
@@ -283,12 +400,20 @@ def create_email_page(msgid, sender, subject, dt, text):
 		"Body": {"rich_text":[{"type":"text","text":{"content": text}}]} if text else {"rich_text":[]},
 		"Email Date": {"date":{"start": dt.astimezone(timezone.utc).isoformat()}},
 	}
+
+	# If we have attachment files prepared for Notion, set the Files property (name must match DB property)
+	if attachment_files:
+		# Notion file properties use the key name of the property and a `files` list
+		props["Attachments"] = {"files": attachment_files}
+
 	try:
 		logger.debug("Creating Notion page for Message-ID=%s Subject=%s", (msgid or "" )[:80], (subject or "")[:80])
 		page = notion.pages.create(parent={"database_id": LINE_DB_ID}, properties=props)
 		logger.info("Notion page created: %s", page.get("id") if isinstance(page, dict) else "(unknown)")
+		return page
 	except Exception:
 		logger.exception("Failed to create Notion page for Message-ID=%s", msgid)
+		return None
 
 # --- Parse headers minimi ---
 def parse_email_metadata(raw_bytes):
@@ -304,8 +429,28 @@ def parse_email_metadata(raw_bytes):
 	date_tuple = email.utils.parsedate_tz(m.get("Date"))
 	dt = datetime.fromtimestamp(email.utils.mktime_tz(date_tuple), tz=timezone.utc) if date_tuple else datetime.now(timezone.utc)
 	text, _ = get_best_body(m)
-	logger.debug("Parsed email headers: Message-ID=%s From=%s Subject=%s Date=%s", (msgid or "")[:80], (sender or "")[:80], (subject or "")[:80], dt.isoformat())
-	return msgid, sender, subject, dt, text
+
+	# Extract attachments (filename + bytes + content_type)
+	attachments = []
+	if m.is_multipart():
+		for part in m.walk():
+			# skip containers
+			if part.is_multipart():
+				continue
+			filename = part.get_filename()
+			if filename:
+				# decode RFC2231/encoded filenames
+				try:
+					fn_parts = email.header.decode_header(filename)
+					fn = "".join([p.decode(enc or "utf-8", "replace") if isinstance(p, bytes) else p for p, enc in fn_parts])
+				except Exception:
+					fn = filename
+				payload = part.get_payload(decode=True) or b""
+				ctype = part.get_content_type()
+				attachments.append({"filename": fn, "content_type": ctype, "data": payload})
+
+	logger.debug("Parsed email headers: Message-ID=%s From=%s Subject=%s Date=%s attachments=%d", (msgid or "")[:80], (sender or "")[:80], (subject or "")[:80], dt.isoformat(), len(attachments))
+	return msgid, sender, subject, dt, text, attachments
 
 # --- Main ---
 def main():
@@ -348,14 +493,16 @@ def main():
 								logger.warning("No data for uid %s (skipping)", uid)
 								continue
 							try:
-								msgid, sender, subject, dt, text = parse_email_metadata(item["raw"])
+								msgid, sender, subject, dt, text, attachments = parse_email_metadata(item["raw"])
 								# Dedup: skip if we've already processed this Message-ID or UID
 								if is_seen(store, uid, msgid, folder):
 									logger.info("Skipping already-processed message uid=%s msgid=%s", uid, (msgid or "")[:80])
 									continue
+								# Save attachments and obtain Notion file entries (external) if possible
+								attachment_files = save_attachments_and_get_urls(attachments, uid)
 								if text:
 									logger.debug("Creating page for Message-ID=%s", (msgid or "")[:80])
-									create_email_page(msgid, sender, subject, dt, text)
+									page = create_email_page(msgid, sender, subject, dt, text, attachment_files=attachment_files)
 									# mark as processed and persist
 									try:
 										mark_seen(store, uid, msgid, folder)

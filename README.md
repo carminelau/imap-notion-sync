@@ -35,6 +35,11 @@ SYNC_SINCE_DAYS=30
 BATCH_SIZE=50
 POLL_INTERVAL=60
 LOG_LEVEL=INFO
+# Attachments
+ATTACHMENTS_DIR=./attachments
+# If you host the attachments under a public URL, set the base URL so the app
+# can attach them to Notion as external files. Example: https://cdn.example.com/imap-files
+ATTACHMENTS_BASE_URL=
 ```
 
 **Database Notion (consigliato)**
@@ -114,6 +119,17 @@ Segnalazione: l'implementazione filtra i messaggi usando UID quando possibile e 
 - `SYNC_SINCE_DAYS`: quanti giorni indietro sincronizzare
 - `BATCH_SIZE`: numero di email per batch
 - `POLL_INTERVAL`: secondi tra controlli
+- `ATTACHMENTS_DIR`: directory nel container dove salvare gli allegati (monta un volume per persistenza)
+- `ATTACHMENTS_BASE_URL`: base URL pubblico per servire gli allegati; se impostato gli allegati saranno aggiunti a Notion come file `external`.
+
+Notion Direct Upload (opzionale)
+- `NOTION_UPLOAD_FILES`: `true|false` (default `false`). Se impostato a `true` il servizio proverà a caricare gli allegati direttamente su Notion usando il metodo "Uploading small files". Se l'upload ha successo, l'allegato verrà referenziato in Notion tramite un `file_upload` ID.
+- `NOTION_VERSION`: stringa per l'header `Notion-Version` (default `2025-09-03`).
+
+Note sul comportamento e limiti:
+- Il flusso diretto supporta file fino a 20 MB (limite della guida "Uploading small files").
+- Dopo la creazione dell'oggetto di upload Notion fornisce un `upload_url` con `expiry_time` (circa 1 ora). Il file deve essere caricato e allegato entro questo intervallo; lo script carica e crea la pagina subito dopo per rispettare il vincolo.
+- Se l'upload diretto fallisce e `ATTACHMENTS_BASE_URL` è impostato, l'applicazione utilizzerà l'URL esterno come fallback. Se nessun fallback è disponibile, il file verrà comunque salvato in `ATTACHMENTS_DIR` e verrà loggato l'errore.
 
 **Troubleshooting rapida**
 - "Connection refused": controlla host/porta/firewall
@@ -134,6 +150,7 @@ Consiglio: imposta `LOG_LEVEL=DEBUG` per debug più dettagliato.
 **Dipendenze principali**
 - `notion-client` (client Notion)
 - `beautifulsoup4` (HTML -> testo)
+ - `requests` (HTTP client usato per il flusso di upload diretto su Notion)
 - Standard library: `imaplib`, `email`, `ssl`
 
 **Licenza & Contribuire**
