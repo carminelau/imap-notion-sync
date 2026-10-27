@@ -1,5 +1,21 @@
 # imap-notion-sync
 
+Sincronizzazione delle email da un server IMAP a un database Notion tramite container Docker.
+
+## Mappa del repository
+
+| Percorso | Contenuto | File |
+|---|---|---:|
+| [file_docker/](./file_docker) | Applicazione e configurazione dell’immagine Docker. | 3 |
+| [custom_filter.py](./custom_filter.py) | Script del progetto. | 1 |
+| [start_with_plugin.py](./start_with_plugin.py) | Script del progetto. | 1 |
+
+---
+
+## Documentazione di riferimento conservata
+
+# imap-notion-sync
+
 Sincronizza automaticamente le email da un server IMAP verso un database Notion.
 
 Questo repository fornisce un'applicazione Docker che legge messaggi IMAP, estrae metadati e crea pagine in un database Notion per tracciare e archiviare le email.
